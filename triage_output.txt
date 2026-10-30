@@ -1,0 +1,46 @@
+﻿=== TASK 1: INPUT GUARDRAILS ===
+empty tickets: 4 | long tickets: 4 | est tokens of a long ticket: 734 (expected 4 / 4 / 734)
+
+=== TASK 2: REDACTION (all 164 tickets) ===
+emails: 55 | phones: 91 | order ids: 132 | total: 278 (expected 55 / 91 / 132 / 278)
+patterns found again in redacted texts: 0 (expected 0)
+
+=== TASK 3: PROMPTS ===
+zero-shot prompt tokens: 34 | few-shot prompt tokens: 117
+
+=== TASKS 4 to 6: FULL RUNS (no budget) ===
+
+--- ZERO-SHOT ---
+status counts: {'classified_json': 135, 'skipped_empty': 4, 'flagged_long': 4, 'classified_keyword': 12, 'flagged_invalid_output': 9}
+classified: 147 | correct: 126 | accuracy: 85.7%
+total tokens: 9712 | tokens per classified ticket: 66.1
+TransientLLMErrors: 19 | retries logged: 19
+retry wait range: 0.0453 to 0.0562 s (allowed 0.0450 to 0.0575)
+
+--- FEW-SHOT ---
+status counts: {'classified_json': 135, 'skipped_empty': 4, 'flagged_long': 4, 'classified_keyword': 12, 'flagged_invalid_output': 9}
+classified: 147 | correct: 147 | accuracy: 100.0%
+total tokens: 22660 | tokens per classified ticket: 154.1
+TransientLLMErrors: 19 | retries logged: 19
+retry wait range: 0.0451 to 0.0572 s (allowed 0.0450 to 0.0575)
+(expected: 135 json / 12 keyword / 9 invalid, 147 classified, 19 errors, zero-shot 85.7% (126/147), few-shot 100%)
+
+Confusion table, zero-shot (rows = true, columns = predicted):
+predicted  billing  delivery  fraud  technical
+true                                          
+billing         38         0      0          0
+delivery         0        36      0          0
+fraud           11         0     23          0
+technical       10         0      0         29
+(expected errors: fraud predicted billing 11, technical predicted billing 10)
+extra tokens per classified ticket for few-shot: 88.1
+
+=== TASK 7: BUDGET DEMO AND FINAL OUTPUT ===
+budget used: 6000 | tickets budget_exhausted: 59 | tokens spent: 6049
+triage_results.csv rows: 164 (expected 164) | tokens: 22660
+status counts: {'classified_json': 135, 'skipped_empty': 4, 'flagged_long': 4, 'classified_keyword': 12, 'flagged_invalid_output': 9}
+routes: {'security_team': 34, 'support_queue': 102, 'human_review': 17, 'premium_desk': 11}
+priorities: {'HIGH': 45, 'NORMAL': 119}
+
+retry log lines in outputs/retry_log.txt: 69
+saved outputs/triage_budget_demo.csv and outputs/triage_results.csv
