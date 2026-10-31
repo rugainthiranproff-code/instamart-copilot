@@ -246,7 +246,98 @@ The test set has 40 Premium customers. They were ranked by predicted lapse proba
 
 ## Part C
 
-TODO
+### Pipeline overview
+
+The triage pipeline is in `src/part_c_triage.py` and processes the 164 tickets of `data/raw/tickets.csv` in file order, using the supplied `mock_llm.py` (no network, no API key). Outputs: `outputs/triage_results.csv`, `outputs/triage_budget_demo.csv`, `outputs/retry_log.txt`, and the printed report in `triage_output.txt`.
+
+### Input guardrails
+
+Before any model call, a ticket whose text is empty or only whitespace gets the status skipped_empty, and a ticket whose estimated token count is above MAX_INPUT_TOKENS = 400 gets the status flagged_long. Neither is ever sent to the model. There are 4 empty tickets and 4 long tickets (each long ticket estimates to 734 tokens), so 156 tickets are eligible for the model.
+
+### Redaction of personal information
+
+Before a ticket goes into a prompt, three regular expressions are applied in this order: email addresses become [EMAIL], phone numbers become [PHONE] and order ids become [ORDER_ID]. The user message sent to the model is exactly the redacted ticket text and nothing else.
+
+| Type | Placeholder | Substitutions |
+|---|---|---|
+| Email | [EMAIL] | 55 |
+| Phone | [PHONE] | 91 |
+| Order id | [ORDER_ID] | 132 |
+| Total | | 278 |
+
+Re-applying the three patterns to the redacted texts finds 0 matches.
+
+### Prompts
+
+Both system prompts contain the word CLASSIFY, list the four allowed categories (billing, delivery, technical, fraud) and require a JSON-only reply of the form {"category": "...", "reason": "..."}. The zero-shot prompt (34 estimated tokens) has no examples. The few-shot prompt (117 estimated tokens) has a line EXAMPLES: followed by labelled examples, including a fraud example.
+
+### Resilient calls
+
+Every model call goes through a retry function with at most 3 retries per ticket. The wait before retry number n is BASE_DELAY x 2**n x random.uniform(0.9, 1.15) with BASE_DELAY = 0.05 seconds, and one log line per retry (ticket id, retry number, wait) is written to `outputs/retry_log.txt`. `mock_llm.reset()` is called immediately before each full run.
+
+In each full run over the 156 eligible tickets the mock raised exactly 19 TransientLLMErrors. All 19 were recovered by a retry, so no ticket ended with a permanent error. With this mock every retry is retry number 0, so each wait must lie between 0.0450 and 0.0575 seconds. The waits observed were 0.0453 to 0.0562 seconds in the zero-shot run and 0.0451 to 0.0572 seconds in the few-shot run.
+
+### Output validation
+
+Every reply is parsed as JSON. If the category is one of the four allowed values, the status is classified_json. If the reply is not valid JSON, the lowercase words are extracted with re.findall(r"[a-z]+", text.lower()) (so billing-related gives the words billing and related), and if exactly one allowed category word is present the status is classified_keyword. Everything else, including valid JSON with a category outside the list, gets the status flagged_invalid_output and goes to human review. The pipeline never guesses.
+
+Status counts for a full run over the 156 eligible tickets (the same for both prompts):
+
+| Status | Tickets |
+|---|---|
+| classified_json | 135 |
+| classified_keyword | 12 |
+| flagged_invalid_output | 9 |
+| skipped_empty | 4 |
+| flagged_long | 4 |
+
+### Zero-shot versus few-shot
+
+Both prompts were run through the full pipeline once, with no token budget. Accuracy is measured against true_category over the 147 classified tickets (135 classified_json and 12 classified_keyword).
+
+| Prompt | Classified | Correct | Accuracy | Total tokens | Tokens per classified ticket |
+|---|---|---|---|---|---|
+| Zero-shot | 147 | 126 | 85.7% | 9,712 | 66.1 |
+| Few-shot | 147 | 147 | 100.0% | 22,660 | 154.1 |
+
+Confusion table for the zero-shot run (rows = true category, columns = predicted category):
+
+| True \ Predicted | billing | delivery | fraud | technical |
+|---|---|---|---|---|
+| billing | 38 | 0 | 0 | 0 |
+| delivery | 0 | 36 | 0 | 0 |
+| fraud | 11 | 0 | 23 | 0 |
+| technical | 10 | 0 | 0 | 29 |
+
+All 21 zero-shot errors are tickets wrongly labelled billing: 11 fraud tickets and 10 technical tickets. The few-shot prompt costs 88.1 more tokens per classified ticket (154.1 against 66.1, and 22,660 against 9,712 tokens in total, about 2.3 times as much), but it removes all 21 errors and lifts accuracy from 85.7% to 100%. The extra tokens are worth paying for when a wrong label is expensive, as with the 11 fraud tickets that zero-shot sent to billing instead of the security team. They are not worth it for low-risk bulk tickets, or when the token budget is tight, because zero-shot is more than twice as cheap. For this support queue I would use the few-shot prompt, because the 88.1 extra tokens per ticket are a small price against fraud cases being missed.
+
+### Token budget demo
+
+TOKEN_BUDGET works as follows: before each model call, if the running total of tokens is already at or above the budget, no call is made and the ticket gets the status budget_exhausted and goes to human review. The zero-shot pipeline was run with TOKEN_BUDGET = 6000 and saved to `outputs/triage_budget_demo.csv`. In this run 59 tickets ended budget_exhausted, and 6,049 tokens were spent (the check happens before a call, so the last call can go slightly over the budget).
+
+### Routing and final output
+
+`outputs/triage_results.csv` comes from a few-shot run with TOKEN_BUDGET = 100000 (no ticket was exhausted; 22,660 tokens in total) and reads `outputs/customer_segments.csv` from Part B. The routing rules, in this order:
+
+1. Status skipped_empty, flagged_long, flagged_invalid_output or budget_exhausted: route human_review, priority NORMAL.
+2. Otherwise, category fraud: route security_team, priority HIGH.
+3. Otherwise, the customer is Premium (is_premium is true): route premium_desk, priority HIGH.
+4. Otherwise: route support_queue, priority NORMAL.
+
+A customer with no row in the segment file is treated as not Premium. The file has 164 rows with the columns ticket_id, customer_id, status, category, segment_name, priority, route and tokens_used.
+
+| Route | Tickets | Priority |
+|---|---|---|
+| security_team | 34 | HIGH |
+| premium_desk | 11 | HIGH |
+| support_queue | 102 | NORMAL |
+| human_review | 17 | NORMAL |
+
+In total there are 45 HIGH and 119 NORMAL tickets.
+
+### Which outputs were validated by rules and which went to humans
+
+147 tickets (135 classified_json and 12 classified_keyword) passed the rule-based validation and were routed automatically. 17 tickets went to human review: 4 empty tickets, 4 long tickets and 9 tickets with an invalid model output. Rule validation only checks that the answer is in the allowed list; it does not check that the category is correct. Accuracy was measured separately against true_category.
 
 ## Part D
 
