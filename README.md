@@ -2,11 +2,47 @@
 
 ## Overview
 
-TODO
+This project is the Instamart Customer Intelligence capstone. It starts from deliberately dirty raw exports and builds, in four parts, a clean data foundation, customer segments with a lapse model, a safe support-ticket triage pipeline, and a policy assistant with a refund agent. Everything runs offline: the supplied `mock_llm.py` stands in for a hosted model, so no network call and no API key is used anywhere.
+
+| Part | What it does | Main results |
+|---|---|---|
+| A | Audit, clean and store the data, then answer seven SQL questions and cross-check them in pandas | 12,309 clean orders, all validation checkpoints passed, all seven SQL queries match |
+| B | RFM table, K-means segments, and a lapse prediction model | 4 segments, selected random forest with test F1 0.64 |
+| C | Support-ticket triage with privacy, retry, validation and budget guardrails | 147 tickets classified, zero-shot accuracy 85.7%, few-shot accuracy 100% |
+| D | Policy RAG assistant and a refund agent with safety limits and resume | 15 chunks, retrieval 12/12, and all seven agent scenarios give the expected outcome |
+
+Repository layout:
+
+| Path | Content |
+|---|---|
+| `generate_data.py`, `mock_llm.py` | The two supplied files, unmodified |
+| `src/` | All source code for Parts A to D |
+| `sql/queries.sql` | The seven SQL queries of Part A |
+| `data/raw/`, `data/clean/`, `data/instamart.db` | Raw exports, clean tables and the SQLite database |
+| `outputs/` | Segments, lapse model, retention list, triage results, agent runs and refund ledger |
+| `state/` | Checkpoints of the refund agent runs |
+| `requirements.txt`, `.gitignore` | Environment and ignore rules |
 
 ## Reproduce
 
-TODO
+All commands are run from the repository root. The project was developed on Windows (PowerShell, VS Code) with Python 3.15.2.
+
+1. Clone the repository and go into it: `git clone https://github.com/rugainthiranproff-code/instamart-copilot.git`, then `cd instamart-copilot`.
+2. Create a virtual environment: `python -m venv .venv`.
+3. Activate it. On Windows PowerShell: `.venv\Scripts\Activate.ps1`. On macOS or Linux: `source .venv/bin/activate`.
+4. Install the libraries: `pip install -r requirements.txt` (the file was written with `pip freeze`).
+5. Regenerate the raw data: `python generate_data.py`.
+6. Part A, audit of the raw data: `python src/part_a_audit.py`.
+7. Part A, cleaning (writes `data/clean/*.csv` and `data/instamart.db`): `python src/part_a_clean.py`.
+8. Part A, validation (prints ALL CHECKPOINTS PASSED): `python src/validate.py`.
+9. Part A, SQL queries and the pandas cross-check: `python src/run_queries.py`, then `python src/part_a_pandas.py`.
+10. Part B, RFM table, K-means and segments (writes `outputs/customer_segments.csv`): `python src/part_b_rfm.py`, then `python src/part_b_kmeans.py`, then `python src/part_b_segments.py`.
+11. Part B, lapse cohort and model (writes `outputs/lapse_model.joblib` and `outputs/retention_list.csv`): `python src/part_b_lapse_define.py`, then `python src/part_b_model.py`.
+12. Part C, ticket triage (needs `outputs/customer_segments.csv` from step 10; writes `outputs/triage_results.csv`, `outputs/triage_budget_demo.csv` and `outputs/retry_log.txt`): `python src/part_c_triage.py`.
+13. Part D, policy RAG chunking, retrieval and evaluation: `python src/part_d_rag_eval.py`.
+14. Part D, refund agent (needs `data/instamart.db` from step 7; it first deletes the old `outputs/agent_runs.jsonl`, `outputs/refund_ledger.jsonl` and `state/*.json`, then recreates them): `python src/part_d_final.py`.
+
+Each script prints its report to the screen. The seeds are fixed, so the numbers in this README are reproduced on every run.
 
 ## Part A
 
@@ -430,126 +466,21 @@ For this refund workflow I would choose ReAct. The next step depends on the orde
 
 ## Limitations and Next Steps
 
-### Audit of the raw data
+### Limitations
 
-Shapes: customers (1200, 5), products (40, 4), orders (13084, 9). Data types and missing values per column:
+- The retention list is illustrative and not a leakage-free evaluation, because the Premium flag comes from the whole-window RFM, which includes the September window that defines the lapse label (the model's own features still use only orders before 2025-09-01). Only 1 of the 10 customers on the list truly lapsed, so it should not be used to judge the model.
+- All model calls use the offline `mock_llm.py`. Its behaviour is fixed and rule-based, so the triage accuracies (85.7% zero-shot and 100% few-shot) and the agent results show how the pipelines behave around this mock, not how a real hosted model would perform. Token counts are estimates (about 1.3 tokens per word), not counts from a real tokenizer.
+- The lapse model was tuned and tested on one cutoff (2025-09-01) with a small test set (232 customers, 89 of them lapsed). The test F1 scores of the two models (0.640 and 0.648) are too close to say that one is truly better, and the random forest was picked on cross-validated F1.
+- Over-sampling raised recall from 0.652 to 0.854 but lowered precision from 0.644 to 0.589, so it only suits a campaign where missing a lapsing customer costs more than a wasted offer.
+- Missing values were filled with medians (age by city, delivery time by product category among completed orders). This is simple and documented, but it hides real variation. The 1,199 cancelled orders keep a missing delivery time on purpose.
+- TF-IDF retrieval only matches exact words, and the 40-word chunks cut some sentences: with no overlap, 2 of the 12 answerable questions failed. The chunk size and overlap were set by the assignment and not tuned.
+- The refund agent uses simple fixed rules (a full refund if delivery took more than 45 minutes, escalation above INR 1000, and every request assumed to be inside the 7-day window). Its time limit is counted from the start of each run or resume. The plan-and-execute comparison is an estimate, because that design was not built.
+- The small negative logistic regression coefficient for the cancellation rate (-0.124) is surprising and weak, and was not investigated further.
 
-| Table | Column | Type | Missing | Missing % |
-|---|---|---|---|---|
-| customers | customer_id | str | 0 | 0.00 |
-| customers | city | str | 0 | 0.00 |
-| customers | signup_date | str | 0 | 0.00 |
-| customers | age | float64 | 61 | 5.08 |
-| customers | gender | str | 30 | 2.50 |
-| products | product_id | str | 0 | 0.00 |
-| products | product_name | str | 0 | 0.00 |
-| products | category | str | 0 | 0.00 |
-| products | price_inr | int64 | 0 | 0.00 |
-| orders | order_id | str | 0 | 0.00 |
-| orders | customer_id | str | 0 | 0.00 |
-| orders | product_id | str | 0 | 0.00 |
-| orders | quantity | int64 | 0 | 0.00 |
-| orders | order_ts | str | 0 | 0.00 |
-| orders | status | str | 0 | 0.00 |
-| orders | discount_pct | int64 | 0 | 0.00 |
-| orders | order_amount | str | 53 | 0.41 |
-| orders | delivery_minutes | float64 | 2541 | 19.42 |
+### Next steps
 
-Audit figures (on the raw files, before any cleaning):
-
-| Check | Value |
-|---|---|
-| Raw order rows | 13,084 |
-| Exact duplicate rows | 119 |
-| Rows with status pending | 656 |
-| Distinct order_id values | 12,309 |
-| Non-numeric order_amount entries | 120 |
-| Negative delivery_minutes | 106 |
-| Blank delivery_minutes | 2,541 |
-| Blank ages | 61 |
-| Ages outside 10-100 | 6 |
-| Distinct raw city spellings | 24 |
-| Distinct non-blank raw gender spellings | 10 |
-| Blank genders | 30 |
-
-### Cleaning rules for customers
-
-1. City: leading and trailing spaces removed and title case applied. The 24 raw spellings become exactly six cities: Pune 227, Delhi 210, Bengaluru 197, Chennai 191, Hyderabad 191, Mumbai 184.
-2. Gender: every spelling is mapped to male, female or unknown, and a blank becomes unknown. Result: female 610, male 560, unknown 30.
-3. Age: the 6 ages outside 10-100 were set to missing. Together with the 61 blank ages, 67 missing ages were filled with the median age of the customer's city (groupby and transform). After this there are 0 missing ages and every age is between 18 and 60.
-4. signup_date was converted to a datetime.
-
-### Cleaning rules for orders
-
-The rules were applied in this order, starting from 13,084 rows:
-
-1. order_ts was converted to a datetime.
-2. Exact duplicate rows were removed: 119 rows, leaving 12,965.
-3. For each order_id only the record with the latest order_ts was kept: 656 older records were removed, leaving 12,309 rows (one per order_id).
-4. order_amount was converted to a number. The 112 entries that could not be used were filled from the product price: round(price_inr x quantity x (1 - discount_pct / 100), 2).
-5. The 105 negative delivery_minutes were set to missing. For completed orders, 774 missing delivery times were filled with the median delivery time of the product category among completed orders (groupby and transform). For cancelled orders delivery_minutes was left missing, because a cancelled order was never delivered and a filled value would be invented data.
-
-The counts in steps 4 and 5 are smaller than the raw audit counts (112 against 120 and 105 against 106) because the audit counted the raw file, while these counts come after duplicates were removed.
-
-Result after cleaning: 12,309 rows, of which 11,110 completed and 1,199 cancelled, with no pending rows. There are 0 missing order_amount values, 0 missing delivery_minutes among completed orders and 1,199 among cancelled orders. The sum of order_amount over completed orders is INR 2,998,668.80.
-
-### Storage and validation
-
-The clean tables are saved as CSV files in `data/clean/` and as the tables customers, products and orders in `data/instamart.db` (order_ts stored as text, YYYY-MM-DD HH:MM:SS). `src/validate.py` checks the reference figures from the cleaning steps and prints ALL CHECKPOINTS PASSED, which it did.
-
-### SQL analysis
-
-The seven queries are in `sql/queries.sql` and are run from `src/run_queries.py` with pd.read_sql_query. Only completed orders count as revenue or spend.
-
-| Query | What it does | Result |
-|---|---|---|
-| Q1 | WHERE (completed, order_amount > 500), then HAVING (customer total > 8000) | 30 customers |
-| Q2 | Revenue by city and category (three-table join) | 30 rows, total INR 2,998,668.80, largest cell Bengaluru / Electronics INR 233,909.45 |
-| Q3 | Products priced above the average price (scalar subquery) | 11 products |
-| Q4 | Customers with no completed order (LEFT JOIN) | 25 customers |
-| Q5 | Customers whose total spend is above the average total (two CTEs) | 550 customers, average INR 2,552.06 |
-| Q6 | RANK, DENSE_RANK and ROW_NUMBER of spend within each city | see below |
-| Q7 | Daily completed revenue with a running total | 183 daily rows, last cumulative value INR 2,998,668.80 |
-
-Q6, top customer per city by total spend: Bengaluru C0082 (INR 12,856.20), Chennai C0930 (INR 10,151.40), Delhi C0291 (INR 13,742.60), Hyderabad C0743 (INR 12,730.05), Mumbai C0693 (INR 14,766.55), Pune C0426 (INR 10,377.10). Exactly 8 rows have a RANK() different from ROW_NUMBER(). Ties cause this because two customers in the same city with exactly the same total spend get the same RANK(), while ROW_NUMBER() still gives them different numbers.
-
-### pandas cross-check
-
-Q2 was rebuilt with pd.pivot_table(margins=True). Its grand total is INR 2,998,668.80, equal to the SQL total. Completed order_amount per city (groupby with named aggregation):
-
-| City | Sum (INR) | Mean (INR) | Count |
-|---|---|---|---|
-| Bengaluru | 523,643.40 | 276.47 | 1,894 |
-| Chennai | 463,629.15 | 272.72 | 1,700 |
-| Delhi | 502,829.80 | 243.62 | 2,064 |
-| Hyderabad | 528,589.90 | 284.95 | 1,855 |
-| Mumbai | 479,058.50 | 297.00 | 1,613 |
-| Pune | 500,918.05 | 252.48 | 1,984 |
-
-### Exploratory analysis of completed order_amount
-
-| Statistic | Value |
-|---|---|
-| Mean | 269.91 |
-| Median | 135.00 |
-| Skewness | 4.61 |
-| Q1 | 64.80 |
-| Q3 | 297.00 |
-| IQR | 232.20 |
-| Lower fence (Q1 - 1.5 x IQR) | -283.50 |
-| Upper fence (Q3 + 1.5 x IQR) | 645.30 |
-| Outliers below the lower fence | 0 |
-| Outliers above the upper fence | 897 |
-
-Correlation matrix over completed orders:
-
-| | order_amount | discount_pct | quantity | delivery_minutes |
-|---|---|---|---|---|
-| order_amount | 1.000 | -0.095 | 0.087 | -0.003 |
-| discount_pct | -0.095 | 1.000 | -0.000 | -0.010 |
-| quantity | 0.087 | -0.000 | 1.000 | -0.013 |
-| delivery_minutes | -0.003 | -0.010 | -0.013 | 1.000 |
-
-What is this data about? What do its distributions look like? Are there outliers? What relationships exist?
-
-This is order data from Instamart, a quick-commerce service: 11,110 completed orders from six cities, with the amount, quantity, discount and delivery time of each order. Order amounts are strongly right-skewed: the mean (269.91) is about double the median (135.00), the skewness is 4.61, and half of all orders fall between 64.80 and 297.00. There are 897 outliers above the upper fence of 645.30 and none below the lower fence, so a few very large orders pull the average up. The raw data also had anomalies such as negative delivery times, missing amounts and duplicate records, which were cleaned. All correlations among order amount, discount, quantity and delivery time are weak. The largest in absolute value is order amount with discount percentage (-0.095), just ahead of order amount with quantity (+0.087), and delivery time is almost unrelated to everything. A correlation this small does not establish causation, so discounts should not be said to reduce order amounts.
+- Compute the Premium flag from orders before the cutoff only, or split the data by time, so that the retention list becomes a leakage-free evaluation.
+- Test the lapse model on more than one cutoff month, and tune the decision threshold to balance precision and recall against the real cost of a retention offer.
+- Replace the mock with a real model behind the same guardrails (redaction, retries, validation and token budget) and measure triage accuracy and cost again.
+- Try embedding-based retrieval or sentence-aware chunking, so that different wording and chunk boundaries break fewer answers.
+- Build the plan-and-execute agent and compare its real model-call count and token use with the ReAct agent.
