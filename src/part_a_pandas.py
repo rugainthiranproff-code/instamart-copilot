@@ -45,6 +45,14 @@ print(" upper fence 645.30, 897 above, 0 below)")
 corr = df[["order_amount", "discount_pct", "quantity", "delivery_minutes"]].corr()
 print("\n=== CORRELATION ===")
 print(corr.round(3))
-pairs = corr.where(~(corr.index.values[:, None] == corr.columns.values[None, :])).stack()
-print("largest |corr|:", pairs.abs().idxmax(), round(pairs[pairs.abs().idxmax()], 3))
+
+# find the pair with the largest |correlation| (each pair looked at once)
+cols = list(corr.columns)
+best_pair, best_val = None, 0.0
+for i in range(len(cols)):
+    for j in range(i + 1, len(cols)):
+        val = corr.iloc[i, j]
+        if abs(val) > abs(best_val):
+            best_pair, best_val = (cols[i], cols[j]), val
+print("largest |corr|:", best_pair, round(best_val, 3))
 print("(expected order_amount vs discount_pct about -0.095)")
